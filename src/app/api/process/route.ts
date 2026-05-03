@@ -5,11 +5,47 @@ import os from 'os';
 import crypto from 'crypto';
 import { unlink } from 'fs/promises';
 
-const ytDlpPath = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp');
-const youtubedl = create(ytDlpPath);
-
 const isWin = os.platform() === 'win32';
+const isMac = os.platform() === 'darwin';
+
 const ffmpegPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', isWin ? 'ffmpeg.exe' : 'ffmpeg');
+
+async function ensureYtDlp(): Promise<string> {
+  const defaultPath = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp' + (isWin ? '.exe' : ''));
+  
+  try {
+    const { execSync } = require('child_process');
+    execSync(`"${defaultPath}" --version`, { stdio: 'ignore' });
+    return defaultPath;
+  } catch (err: any) {
+    console.log("Default yt-dlp failed (likely missing Python on Vercel). Downloading standalone binary...");
+    
+    const binaryName = isWin ? 'yt-dlp.exe' : (isMac ? 'yt-dlp_macos' : 'yt-dlp_linux');
+    const tmpPath = path.join(os.tmpdir(), binaryName);
+    
+    if (require('fs').existsSync(tmpPath)) {
+      return tmpPath;
+    }
+    
+    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${binaryName}`;
+    const response = await fetch(url);
+    
+    if (!response.ok) throw new Error(`Failed to download yt-dlp from ${url}`);
+    
+    const dest = require('fs').createWriteStream(tmpPath);
+    const { Readable } = require('stream');
+    const { pipeline } = require('stream/promises');
+    
+    // @ts-ignore
+    await pipeline(Readable.fromWeb(response.body), dest);
+    
+    if (!isWin) {
+      require('fs').chmodSync(tmpPath, 0o755);
+    }
+    
+    return tmpPath;
+  }
+}
 
 const isValidUrl = (url: string) => {
   return /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/.test(url);
@@ -38,6 +74,9 @@ export async function GET(request: NextRequest) {
       };
 
       try {
+        const resolvedYtDlpPath = await ensureYtDlp();
+        const youtubedl = create(resolvedYtDlpPath);
+
         // Fetch metadata first to get the title
         sendEvent({ status: 'info', message: 'Fetching metadata...' });
         let videoTitle = 'Video';
