@@ -80,12 +80,25 @@ export async function GET(request: NextRequest) {
         // Fetch metadata first to get the title
         sendEvent({ status: 'info', message: 'Fetching metadata...' });
         let videoTitle = 'Video';
+        const baseOptions: any = {
+          noCheckCertificates: true,
+          noWarnings: true,
+          noPlaylist: true,
+        };
+
+        if (process.env.YOUTUBE_COOKIES) {
+          const cookiesFilePath = path.join(os.tmpdir(), 'youtube-cookies.txt');
+          require('fs').writeFileSync(cookiesFilePath, process.env.YOUTUBE_COOKIES);
+          baseOptions.cookies = cookiesFilePath;
+        } else {
+          // Fallback workaround if no cookies are provided
+          baseOptions.extractorArgs = 'youtube:player_client=android,web';
+        }
+
         try {
           const info: any = await youtubedl(url, {
+            ...baseOptions,
             dumpJson: true,
-            noWarnings: true,
-            noPlaylist: true,
-            noCheckCertificates: true,
           });
           if (info && info.title) {
             videoTitle = info.title;
@@ -97,15 +110,13 @@ export async function GET(request: NextRequest) {
         }
 
         const subprocess = youtubedl.exec(url, {
+          ...baseOptions,
           output: tmpFilePath,
           format: 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
           mergeOutputFormat: 'mp4',
           ffmpegLocation: ffmpegPath || undefined,
           concurrentFragments: 4,
-          noCheckCertificates: true,
-          noWarnings: true,
           preferFreeFormats: true,
-          noPlaylist: true,
         } as any);
 
         subprocess.catch((err) => {
