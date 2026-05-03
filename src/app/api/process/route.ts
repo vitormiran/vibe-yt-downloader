@@ -8,7 +8,8 @@ import { unlink } from 'fs/promises';
 const isWin = os.platform() === 'win32';
 const isMac = os.platform() === 'darwin';
 
-const ffmpegPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', isWin ? 'ffmpeg.exe' : 'ffmpeg');
+const rawFfmpegPath = require('ffmpeg-static');
+const ffmpegPath = typeof rawFfmpegPath === 'string' ? rawFfmpegPath.replace(/^"|"$/g, '') : rawFfmpegPath;
 
 async function ensureYtDlp(): Promise<string> {
   const defaultPath = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp' + (isWin ? '.exe' : ''));
@@ -109,14 +110,20 @@ export async function GET(request: NextRequest) {
           // Continue with download even if metadata fails
         }
 
+        console.log("Resolved ffmpegPath:", ffmpegPath);
         const subprocess = youtubedl.exec(url, {
-          ...baseOptions,
           output: tmpFilePath,
-          format: 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+          format: 'bestvideo[height<=1080]+bestaudio/best',
+          formatSort: 'res,ext:mp4:m4a',
           mergeOutputFormat: 'mp4',
           ffmpegLocation: ffmpegPath || undefined,
+          jsRuntimes: 'node:' + process.execPath,
           concurrentFragments: 4,
+          noCheckCertificates: true,
+          noWarnings: true,
           preferFreeFormats: true,
+          noPlaylist: true,
+          ...baseOptions
         } as any);
 
         subprocess.catch((err) => {
@@ -160,6 +167,7 @@ export async function GET(request: NextRequest) {
 
         subprocess.on('close', async (code) => {
           if (code === 0) {
+            console.log("yt-dlp output:", errorLog);
             sendEvent({ status: 'ready', fileId: tmpFileName });
           } else {
             console.error("yt-dlp error log:", errorLog);

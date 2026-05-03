@@ -7,9 +7,7 @@ const nextConfig: NextConfig = {
       "./node_modules/ffmpeg-static/**/*"
     ],
   },
-  experimental: {
-    serverComponentsExternalPackages: ['youtube-dl-exec', 'ffmpeg-static'],
-  }
+  serverExternalPackages: ['youtube-dl-exec', 'ffmpeg-static']
 };
 
 export default nextConfig;
