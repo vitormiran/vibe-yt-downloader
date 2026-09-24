@@ -6,11 +6,48 @@ import os from 'os';
 import crypto from 'crypto';
 import { unlink } from 'fs/promises';
 
-const ytDlpPath = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp');
-const youtubedl = create(ytDlpPath);
-
 const isWin = os.platform() === 'win32';
-const ffmpegPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', isWin ? 'ffmpeg.exe' : 'ffmpeg');
+const isMac = os.platform() === 'darwin';
+
+const rawFfmpegPath = require('ffmpeg-static');
+const ffmpegPath = typeof rawFfmpegPath === 'string' ? rawFfmpegPath.replace(/^"|"$/g, '') : rawFfmpegPath;
+
+async function ensureYtDlp(): Promise<string> {
+  const defaultPath = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp' + (isWin ? '.exe' : ''));
+  
+  try {
+    const { execSync } = require('child_process');
+    execSync(`"${defaultPath}" --version`, { stdio: 'ignore' });
+    return defaultPath;
+  } catch (err: any) {
+    console.log("Default yt-dlp failed (likely missing Python on Vercel). Downloading standalone binary...");
+    
+    const binaryName = isWin ? 'yt-dlp.exe' : (isMac ? 'yt-dlp_macos' : 'yt-dlp_linux');
+    const tmpPath = path.join(os.tmpdir(), binaryName);
+    
+    if (require('fs').existsSync(tmpPath)) {
+      return tmpPath;
+    }
+    
+    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${binaryName}`;
+    const response = await fetch(url);
+    
+    if (!response.ok) throw new Error(`Failed to download yt-dlp from ${url}`);
+    
+    const dest = require('fs').createWriteStream(tmpPath);
+    const { Readable } = require('stream');
+    const { pipeline } = require('stream/promises');
+    
+    // @ts-ignore
+    await pipeline(Readable.fromWeb(response.body), dest);
+    
+    if (!isWin) {
+      require('fs').chmodSync(tmpPath, 0o755);
+    }
+    
+    return tmpPath;
+  }
+}
 
 const isValidUrl = (url: string) => {
   return /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/.test(url);
@@ -39,15 +76,31 @@ export async function GET(request: NextRequest) {
       };
 
       try {
+        const resolvedYtDlpPath = await ensureYtDlp();
+        const youtubedl = create(resolvedYtDlpPath);
+
         // Fetch metadata first to get the title
         sendEvent({ status: 'info', message: 'Fetching metadata...' });
         let videoTitle = 'Video';
+        const baseOptions: any = {
+          noCheckCertificates: true,
+          noWarnings: true,
+          noPlaylist: true,
+        };
+
+        if (process.env.YOUTUBE_COOKIES) {
+          const cookiesFilePath = path.join(os.tmpdir(), 'youtube-cookies.txt');
+          require('fs').writeFileSync(cookiesFilePath, process.env.YOUTUBE_COOKIES);
+          baseOptions.cookies = cookiesFilePath;
+        } else {
+          // Fallback workaround if no cookies are provided
+          baseOptions.extractorArgs = 'youtube:player_client=android,web';
+        }
+
         try {
           const info: any = await youtubedl(url, {
+            ...baseOptions,
             dumpJson: true,
-            noWarnings: true,
-            noPlaylist: true,
-            noCheckCertificates: true,
             jsRuntimes: 'node',
           });
           if (info && info.title) {
@@ -59,17 +112,20 @@ export async function GET(request: NextRequest) {
           // Continue with download even if metadata fails
         }
 
+        console.log("Resolved ffmpegPath:", ffmpegPath);
         const subprocess = youtubedl.exec(url, {
           output: tmpFilePath,
-          format: 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+          format: 'bestvideo[height<=1080]+bestaudio/best',
+          formatSort: 'res,ext:mp4:m4a',
           mergeOutputFormat: 'mp4',
           ffmpegLocation: ffmpegPath || undefined,
+          jsRuntimes: 'node:' + process.execPath,
           concurrentFragments: 4,
           noCheckCertificates: true,
           noWarnings: true,
           preferFreeFormats: true,
           noPlaylist: true,
-          jsRuntimes: 'node',
+          ...baseOptions,
         } as any);
 
         subprocess.catch((err) => {
