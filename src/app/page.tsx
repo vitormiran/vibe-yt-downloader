@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Download, Link as LinkIcon, Loader2, AlertCircle, CheckCircle2, FileVideo } from 'lucide-react';
+import posthog from 'posthog-js';
 
 type DownloadJob = {
   id: string;
@@ -25,6 +26,7 @@ export default function Home() {
     
     if (!urls.trim()) {
       setMessage({ type: 'error', text: 'Please enter at least one YouTube URL' });
+      posthog.capture('download_validation_failed', { reason: 'empty_input' });
       return;
     }
 
@@ -32,19 +34,24 @@ export default function Home() {
     
     if (urlList.length === 0) {
       setMessage({ type: 'error', text: 'Please enter valid YouTube URLs' });
+      posthog.capture('download_validation_failed', { reason: 'empty_input' });
       return;
     }
 
     if (urlList.length > 10) {
       setMessage({ type: 'error', text: 'You can only download up to 10 videos at once' });
+      posthog.capture('download_validation_failed', { reason: 'too_many_urls', url_count: urlList.length });
       return;
     }
 
     const invalidUrls = urlList.filter(u => !u.includes('youtube.com/') && !u.includes('youtu.be/'));
     if (invalidUrls.length > 0) {
       setMessage({ type: 'error', text: 'One or more URLs are not valid YouTube links' });
+      posthog.capture('download_validation_failed', { reason: 'invalid_urls', invalid_count: invalidUrls.length, url_count: urlList.length });
       return;
     }
+
+    posthog.capture('download_submitted', { url_count: urlList.length });
 
     setIsDownloading(true);
     setMessage(null);

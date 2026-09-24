@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { create } from 'youtube-dl-exec';
+import { getPostHogClient } from '@/lib/posthog-server';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
@@ -47,6 +48,7 @@ export async function GET(request: NextRequest) {
             noWarnings: true,
             noPlaylist: true,
             noCheckCertificates: true,
+            jsRuntimes: 'node',
           });
           if (info && info.title) {
             videoTitle = info.title;
@@ -67,6 +69,7 @@ export async function GET(request: NextRequest) {
           noWarnings: true,
           preferFreeFormats: true,
           noPlaylist: true,
+          jsRuntimes: 'node',
         } as any);
 
         subprocess.catch((err) => {
@@ -77,6 +80,10 @@ export async function GET(request: NextRequest) {
         let phase = 1;
         let lastProgress = 0;
         let errorLog = '';
+        // Set to true once yt-dlp finished successfully and the file was
+        // handed off to /api/download — from that point the download route
+        // owns cleanup, so an aborted SSE connection must NOT delete the file.
+        let handedOff = false;
 
         if (subprocess.stderr) {
           subprocess.stderr.on('data', (chunk) => {
@@ -109,26 +116,49 @@ export async function GET(request: NextRequest) {
         }
 
         subprocess.on('close', async (code) => {
+          const posthog = getPostHogClient();
           if (code === 0) {
+            handedOff = true;
             sendEvent({ status: 'ready', fileId: tmpFileName });
+            posthog.capture({
+              distinctId: 'anonymous',
+              event: 'video_download_completed',
+              properties: { has_title: videoTitle !== 'Video', phases_completed: phase },
+            });
           } else {
             console.error("yt-dlp error log:", errorLog);
             sendEvent({ status: 'error', message: `yt-dlp exited with code ${code}. Check server logs.` });
+            posthog.capture({
+              distinctId: 'anonymous',
+              event: 'video_download_failed',
+              properties: { exit_code: code, phase },
+            });
             await unlink(tmpFilePath).catch(() => {});
           }
+          await posthog.shutdown();
           try { controller.close(); } catch(e){}
         });
 
         subprocess.on('error', async (err) => {
+          const posthog = getPostHogClient();
           sendEvent({ status: 'error', message: err.message });
+          posthog.capture({
+            distinctId: 'anonymous',
+            event: 'video_download_failed',
+            properties: { exit_code: null, phase },
+          });
+          await posthog.shutdown();
           await unlink(tmpFilePath).catch(() => {});
           try { controller.close(); } catch(e){}
         });
 
-        // Cleanup if client disconnects
+        // Cleanup if client disconnects — but never delete a file that was
+        // successfully downloaded and is about to be (or already being) served.
         request.signal.addEventListener('abort', () => {
           subprocess.kill();
-          unlink(tmpFilePath).catch(() => {});
+          if (!handedOff) {
+            unlink(tmpFilePath).catch(() => {});
+          }
         });
 
       } catch (err: any) {
